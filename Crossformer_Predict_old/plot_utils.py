@@ -6,15 +6,12 @@ import numpy as np
 plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
 
-def plot_predictions(trues, preds, folder_path, target_col):
-    """
-    绘制整体预测对比图 (取最后一个时间步)
+# [plot_utils.py]
 
-    Args:
-        trues: 真实值数组 (numpy array)
-        preds: 预测值数组 (numpy array)
-        folder_path: 保存文件夹路径
-        target_col: 目标变量名称 (用于标题)
+def plot_predictions(trues, preds, folder_path, target_col, step_label="overview"):
+    """
+    绘制整体预测对比图 (支持多步长)
+    [修改版]：增加了 step_label 参数，用于生成不同的文件名和标题
     """
     plt.figure(figsize=(12, 6))
 
@@ -28,13 +25,18 @@ def plot_predictions(trues, preds, folder_path, target_col):
     plt.plot(gt_plot, label='Actual (℃)', color='#1f77b4', linewidth=1.5)
     plt.plot(pd_plot, label='Prediction (℃)', color='#e377c2', linestyle='--', linewidth=1.5)
 
-    plt.title(f'Prediction Overview: {target_col} (Last Step)')
+    # [修改点1]：标题动态化
+    plt.title(f'Prediction Overview: {target_col} ({step_label})')
     plt.xlabel('Time Steps (Samples)')
     plt.ylabel('Temperature (℃)')
     plt.legend()
     plt.grid(True, alpha=0.3)
 
-    save_path = os.path.join(folder_path, 'prediction_comparison.png')
+    # [修改点2]：文件名动态化，防止覆盖
+    # 如果 step_label 是 "Step 6"，文件名变成 "prediction_Step_6.png"
+    safe_label = step_label.replace(" ", "_")
+    save_path = os.path.join(folder_path, f'prediction_{safe_label}.png')
+
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"整体对比图已保存: {save_path}")
@@ -43,31 +45,40 @@ def plot_predictions(trues, preds, folder_path, target_col):
 def plot_case_visuals(visual_samples, folder_path, mean, std):
     """
     绘制个例详细分析图 (历史+未来)
-
-    Args:
-        visual_samples: 包含 (hist, true, pred) 元组的列表
-        folder_path: 保存文件夹路径
-        mean: 反归一化均值
-        std: 反归一化标准差
+    [优化版]：只展示最近的一部分历史数据，避免预测部分被压缩
     """
+    # 设定你希望展示的历史长度
+    # 你的预测是 24，建议这里设为 48 或 72，这样比例大约是 2:1 或 3:1，视觉效果最好
+    SHOW_HISTORY_LEN = 72
+
     for idx, (hist, true, pred) in enumerate(visual_samples):
         # 手动反归一化
         hist = hist * std + mean
         true = true * std + mean
         pred = pred * std + mean
 
-        # 准备坐标轴
         seq_len = len(hist)
         pred_len = len(true)
-        # 历史部分坐标: 0 ~ 95
-        x_hist = np.arange(seq_len)
-        # 预测部分坐标: 96 ~ 119
+
+        # === 核心修改逻辑 Start ===
+        # 如果历史数据太长，我们只取最后一段来画
+        if seq_len > SHOW_HISTORY_LEN:
+            # 切片：取最后 SHOW_HISTORY_LEN 个点
+            plot_hist = hist[-SHOW_HISTORY_LEN:]
+            # 调整 X 轴坐标：保证时间轴是连续的 (例如从 120 到 192)
+            x_hist = np.arange(seq_len - SHOW_HISTORY_LEN, seq_len)
+        else:
+            plot_hist = hist
+            x_hist = np.arange(seq_len)
+        # === 核心修改逻辑 End ===
+
+        # 预测部分坐标: 192 ~ 216
         x_future = np.arange(seq_len, seq_len + pred_len)
 
         plt.figure(figsize=(10, 5))
 
-        # 1. 画历史部分 (输入)
-        plt.plot(x_hist, hist, label='History (Input)', color='black', alpha=0.6, linewidth=1.5)
+        # 1. 画历史部分 (使用切片后的数据)
+        plt.plot(x_hist, plot_hist, label='History (Recent)', color='black', alpha=0.6, linewidth=1.5)
 
         # 2. 画未来真实值
         plt.plot(x_future, true, label='Ground Truth', color='green', marker='.', linewidth=2)
@@ -78,7 +89,7 @@ def plot_case_visuals(visual_samples, folder_path, mean, std):
         # 4. 画分隔线
         plt.axvline(x=seq_len - 1, color='orange', linestyle=':', label='Current Time')
 
-        plt.title(f'Case Study #{idx + 1}: Forecast Analysis')
+        plt.title(f'Case Study #{idx + 1}: Forecast Analysis (Last {SHOW_HISTORY_LEN} steps context)')
         plt.xlabel('Time Steps')
         plt.ylabel('Temperature (℃)')
         plt.legend()

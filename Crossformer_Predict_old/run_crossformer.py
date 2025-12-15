@@ -16,8 +16,23 @@ from crossformer_model import Crossformer
 from dataset import AutoColumnDataset
 from plot_utils import plot_predictions, plot_case_visuals
 
-warnings.filterwarnings('ignore')
+#引入随机数
+import random
+import os
 
+warnings.filterwarnings('ignore')
+#随机数种子
+def fix_seed(seed=2025):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed) # if you are using multi-GPU.
+    # 下面这两行会让卷积算法确定化，但可能会稍微降低训练速度
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    print(f">>> [Reproducibility] Random Seed Fixed: {seed} <<<")
 
 # ================================================================
 #  工具函数
@@ -118,7 +133,7 @@ class Config:
         # 【降采样】5表示20秒间隔
         self.resample_step = 2
         # 【数据比例】0.1=调试模式, 1.0=全量模式
-        self.data_percentage = 1
+        self.data_percentage = 0.1
 
         # 2. 预测任务设置
         self.seq_len = 192
@@ -250,15 +265,34 @@ class Trainer:
                 # Crossformer 不需要时间特征 mark，所以只传 batch_x
                 outputs = self.model(batch_x)
 
-                # D. 切片对齐：只取我们需要预测的那一列（温度）
-                f_dim = -1
-                # outputs: [Batch, Pred_Len, 26] -> [Batch, Pred_Len, 1]
-                pred = outputs[:, :, f_dim:]
-                # batch_y: 取最后一段 Pred_Len 长度，且只取最后一列
-                true = batch_y[:, -self.args.pred_len:, f_dim:]
+                # ========================================================
+                # [修改区域 Start]：实施 Hybrid Loss (混合损失)
+                # ========================================================
+
+                # 1. 准备真实标签 (全变量)
+                # batch_y 包含了 历史(seq_len) + 未来(pred_len)，我们只取未来这一段
+                # 形状: [Batch, Pred_Len, 24] (假设24维)
+                true_all = batch_y[:, -self.args.pred_len:, :]
+
+                # 2. 计算【主任务 Loss】：只看最后一列（水冷壁温度）
+                # 我们希望模型在这一列上准之又准
+                pred_target = outputs[:, :, -1:]
+                true_target = true_all[:, :, -1:]
+                loss_target = self.criterion(pred_target, true_target)
+
+                # 3. 计算【辅助任务 Loss】：看所有变量
+                # 强迫 Router 去理解 风量、给煤量、负荷 之间的物理联动
+                loss_all = self.criterion(outputs, true_all)
+
+                # 4. 混合 Loss
+                # 0.5 是权重系数 (alpha)，表示分出一半精力兼顾全局物理规律
+                loss = loss_target + 0.5 * loss_all
+
+                # ========================================================
+                # [修改区域 End]
+                # ========================================================
 
                 # E. 计算误差 (Loss)
-                loss = self.criterion(pred, true)
                 train_loss.append(loss.item())  #item()能提取张量的原生浮点数，是训练中存储损失的标准写法。
                 # F. 反向传播 (Backward)：计算每个参数该怎么调
                 loss.backward()
@@ -382,6 +416,7 @@ class Trainer:
 
         # 10. 保存成绩单到 txt
         with open(os.path.join(folder_path, 'metrics.txt'), 'w') as f:
+            # A. 写入核心指标
             f.write(f"Experiment Setting: {setting}\n")
             f.write(f"Resample Step: {self.args.resample_step}\n")
             f.write(f"Data Percentage: {self.args.data_percentage}\n")
@@ -391,13 +426,46 @@ class Trainer:
             f.write(f"RMSE : {rmse:.4f}\n")
             f.write(f"R2   : {r2:.4f}\n")
 
+            # B. 写入所有模型配置参数 (自动遍历 Config)
+            f.write("\n" + "-" * 30 + " Configuration " + "-" * 30 + "\n")
+            # vars(obj) 可以把对象的所有属性变成一个字典
+            for key, value in vars(self.args).items():
+                # 过滤掉一些不需要打印的内部对象（比如 device 对象, 或者私有属性）
+                if not key.startswith('_') and not isinstance(value, torch.device):
+                    f.write(f"{key:<20} : {value}\n")  # <20 表示左对齐占20格，排版更整齐
+            f.write("-" * 75 + "\n")
+
         # 11. 画图 (调用外部 plot_utils)
 
-        # A. 整体对比图：只取每个样本的最后一个预测点连成线
-        # [:, -1, 0] 意思：所有样本，最后一个时间步，第0个特征
-        last_point_trues = trues[:, -1, 0]
-        last_point_preds = preds[:, -1, 0]
-        plot_predictions(last_point_trues, last_point_preds, folder_path, self.args.target_col)
+        # A. 整体对比图
+        # 定义你想看的关键时间点 (第6, 12, 18, 24个预测点)
+        # 注意：如果 args.pred_len 小于 24，代码会自动跳过不存在的点
+        key_steps = [6, 12, 18, 24]
+
+        print("-" * 20 + " 开始绘制分步预测图 " + "-" * 20)
+
+        for step in key_steps:
+            # 检查 step 是否越界 (比如你只预测了 12 步，就画不了 24)
+            if step > self.args.pred_len:
+                    continue
+
+            # --- 核心切片逻辑 ---
+            # 数组索引从 0 开始，所以第 6 个点索引是 5 (step - 1)
+            # trues 形状: [Sample_Num, Pred_Len, 1]
+            step_idx = step - 1
+
+            # 取出所有样本在这一时刻的真实值和预测值
+            current_step_trues = trues[:, step_idx, 0]
+            current_step_preds = preds[:, step_idx, 0]
+
+            # 调用画图函数，传入标签 "Step 6" 等
+            plot_predictions(
+                current_step_trues,
+                current_step_preds,
+                folder_path,
+                self.args.target_col,
+                step_label=f"Step {step}"
+            )
 
         # B. 个例分析图：把刚才抓拍的 visual_samples 画出来
         # 需要获取均值和方差，因为 plot_case_visuals 里可能会再次反归一化(取决于你的实现)
@@ -408,53 +476,68 @@ class Trainer:
 
 
 if __name__ == '__main__':
+    # 1. 固定随机种子
+    SEED = 2025
+    fix_seed(SEED)
+
     args = Config()
 
-#安全检查与特征数自动计算
-    # A. 检查文件是否存在
+    # 2. 生成随机实验ID
+    import random
+    rand_id = random.randint(1000, 9999)
+
+    args.random_seed = SEED  # 记录固定的种子
+    args.experiment_id = rand_id  # 记录本次的随机ID
+
+    # ======================================================
+    #  🔥 【修改点】手动指定要测试的模型文件夹名称
+    #  如果这里填了字符串（比如 'Crossformer_TEM_sl192_...'），
+    #  代码就会跳过训练，直接去这个文件夹里加载模型进行测试。
+    #  如果填 None，则代表“训练+测试”的新实验模式。
+    # ======================================================
+    TEST_ONLY_SETTING = None  # <--- 平时设为 None，想复现时填入你的文件夹名
+
+    # 安全检查与特征数自动计算 (保持不变)
     if not os.path.exists(os.path.join(args.root_path, args.data_path)):
         print(f"错误：找不到文件 {args.data_path}")
         exit()
 
-    # B. 试读前5行 (为了获取列数)
-    try:        # 优先尝试 GBK 编码 (中文 Windows 常见)
+    try:
         df_tmp = pd.read_csv(os.path.join(args.root_path, args.data_path), nrows=5, encoding='gbk')
-    except:     # 如果失败，尝试默认编码 (UTF-8)
+    except:
         df_tmp = pd.read_csv(os.path.join(args.root_path, args.data_path), nrows=5)
+    args.enc_in = df_tmp.shape[1] - 1
+    print(f"【Crossformer】变量数: {args.enc_in} ...")
 
-    # C. 计算特征数量
-    # df_tmp.shape[1] 是总列数。减 1 是因为通常第一列是“时间”，不作为特征输入。
-    num_vars = df_tmp.shape[1] - 1
-
-    # D. 自动回填参数
-    # 将算出来的特征数赋值给 args.enc_in，这样模型就知道输入层要有几个神经元了。
-    args.enc_in = num_vars
-    # 打印确认信息，让你放心
-    print(f"【Crossformer】变量数: {num_vars}, 降采样: {args.resample_step}, 数据量: {args.data_percentage * 100}%")
-#生成实验“身份证”
-    import re
-
-    # A. 清洗目标列名
-    # 有些列名里可能有 / \ : * ? " < > | 等文件名非法字符
-    # 这行正则代码把它们统统删掉，只保留汉字、字母、数字和下划线
-    safe_target = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9_]', '', args.target_col)
-
-    # B. 获取当前时间戳
-    timestamp = time.strftime('%Y%m%d_%H%M%S')
-
-    # C. 拼接唯一的 Setting 字符串
-    # 格式：模型名_目标_历史长度_预测长度_降采样步长_数据量比例_时间戳
-    setting = f'Crossformer_{safe_target[:4]}_sl{args.seq_len}_pl{args.pred_len}_rs{args.resample_step}_dp{int(args.data_percentage * 100)}_{timestamp}'
-
-    print(f">>> 本次实验唯一标识符: {setting}")
-#启动引擎
-    # 1. 雇佣训练员 (实例化 Trainer)
-    # Trainer 初始化时会根据 args 创建模型、优化器等
+    # 实例化 Trainer
     trainer = Trainer(args)
 
-    # 2. 开始训练
-    print('>>>>>>> 开始训练 Crossformer >>>>>>>')
-    trainer.train(setting)
-    # 3. 开始测试
-    print('>>>>>>> 开始测试 Crossformer >>>>>>>')
-    trainer.test(setting)
+    # === 分支逻辑 ===
+    if TEST_ONLY_SETTING is not None:
+        # 【模式 A：只测试旧模型】
+        print(f">>> 进入【只测试模式】 (Test Only)")
+        print(f">>> 即将加载模型: {TEST_ONLY_SETTING}")
+
+        # 检查文件夹是否存在，防止填错
+        if not os.path.exists(os.path.join(args.checkpoints, TEST_ONLY_SETTING)):
+            print(f"❌ 错误：在 checkpoints 目录下找不到文件夹 [{TEST_ONLY_SETTING}]")
+            print("请检查文件夹名字是否复制正确！")
+            exit()
+
+        # 直接测试
+        trainer.test(TEST_ONLY_SETTING)
+
+    else:
+        # 【模式 B：新训练 + 测试】
+        import re
+
+        safe_target = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9_]', '', args.target_col)
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        setting = f'Crossformer_{safe_target[:4]}_sl{args.seq_len}_pl{args.pred_len}_rs{args.resample_step}_dp{int(args.data_percentage * 100)}_{timestamp}_{rand_id}'
+
+        print(f">>> 本次实验唯一标识符: {setting}")
+        print('>>>>>>> 开始训练 Crossformer >>>>>>>')
+        trainer.train(setting)
+
+        print('>>>>>>> 开始测试 Crossformer >>>>>>>')
+        trainer.test(setting)
