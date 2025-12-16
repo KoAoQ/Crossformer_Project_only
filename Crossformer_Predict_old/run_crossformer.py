@@ -50,6 +50,30 @@ def metric(pred, true):
     return MAE, MSE, RMSE, MAPE, MSPE, R2
 
 
+class TemporalWeightedMSE(nn.Module):
+    def __init__(self, seq_len=24, start_weight=1.0, end_weight=2.0):
+        super().__init__()
+        self.seq_len = seq_len
+        # 生成一个从 start 到 end 的线性权重向量
+        # 例如: [1.0, 1.04, 1.08, ..., 2.0]
+        self.weights = torch.linspace(start_weight, end_weight, seq_len)
+
+    def forward(self, pred, true):
+        # pred, true 形状: [Batch, 24, Dim]
+
+        # 1. 计算每个点的平方误差 (不求平均)
+        # shape: [Batch, 24, Dim]
+        loss_pointwise = (pred - true) ** 2
+
+        # 2. 把权重移到对应设备上 (GPU/CPU)
+        w = self.weights.to(pred.device).view(1, -1, 1)  # 变成 [1, 24, 1] 以便广播
+
+        # 3. 加权
+        loss_weighted = loss_pointwise * w
+
+        # 4. 求平均
+        return loss_weighted.mean()
+
 class EarlyStopping:
     # __init__ 是类的构造函数，创建对象时自动执行
     def __init__(self, patience=7, verbose=False, delta=0):
@@ -205,7 +229,7 @@ class Trainer:
         # 3. 定义损失函数 (Criterion)
         # MSELoss (均方误差) 是回归任务最常用的“打分器”
         # 它计算 (预测值 - 真实值)^2 的平均值
-        self.criterion = nn.MSELoss()
+        self.criterion = TemporalWeightedMSE(seq_len=self.args.pred_len, start_weight=1.0, end_weight=2.5)
 
     def _get_data(self, flag):
         # 1. 决定要不要打乱数据 (Shuffle)
