@@ -229,7 +229,7 @@ class Trainer:
         # 3. 定义损失函数 (Criterion)
         # MSELoss (均方误差) 是回归任务最常用的“打分器”
         # 它计算 (预测值 - 真实值)^2 的平均值
-        self.criterion = TemporalWeightedMSE(seq_len=self.args.pred_len, start_weight=1.0, end_weight=2.5)
+        self.criterion = TemporalWeightedMSE(seq_len=self.args.pred_len, start_weight=1.0, end_weight=10.0)
 
     def _get_data(self, flag):
         # 1. 决定要不要打乱数据 (Shuffle)
@@ -439,6 +439,7 @@ class Trainer:
             os.makedirs(folder_path)
 
         # 10. 保存成绩单到 txt
+        print(f">>> 正在计算分步指标并保存至: {folder_path}/metrics.txt ...")
         with open(os.path.join(folder_path, 'metrics.txt'), 'w') as f:
             # A. 写入核心指标
             f.write(f"Experiment Setting: {setting}\n")
@@ -449,8 +450,28 @@ class Trainer:
             f.write(f"MSE  : {mse:.4f}\n")
             f.write(f"RMSE : {rmse:.4f}\n")
             f.write(f"R2   : {r2:.4f}\n")
+            f.write("-" * 30 + "\n")
 
-            # B. 写入所有模型配置参数 (自动遍历 Config)
+            # B. [核心修改] 写入关键时间点(6, 12, 18, 24)的单独指标
+            f.write("\n" + "=" * 15 + " Step-wise Performance " + "=" * 15 + "\n")
+            key_steps = [6, 12, 18, 24]
+
+            for step in key_steps:
+                if step > self.args.pred_len:
+                    continue
+
+                # 取出第 step 个时刻的数据 (索引是 step-1)
+                step_idx = step - 1
+                # 切片形状: [Batch, 1] -> 拍扁 -> [Batch]
+                curr_pred = preds[:, step_idx, :].reshape(-1)
+                curr_true = trues[:, step_idx, :].reshape(-1)
+
+                # 单独算分
+                s_mae, s_mse, s_rmse, s_mape, s_mspe, s_r2 = metric(curr_pred, curr_true)
+
+                f.write(f"Step {step:<2}: MAE={s_mae:.4f} | MSE={s_mse:.4f} | RMSE={s_rmse:.4f} | R2={s_r2:.4f}\n")
+
+            # c. 写入所有模型配置参数 (自动遍历 Config)
             f.write("\n" + "-" * 30 + " Configuration " + "-" * 30 + "\n")
             # vars(obj) 可以把对象的所有属性变成一个字典
             for key, value in vars(self.args).items():
@@ -497,6 +518,185 @@ class Trainer:
         mean = test_data.scaler.mean[-1]
         std = test_data.scaler.std[-1]
         plot_case_visuals(visual_samples, folder_path, mean, std)
+#混合测试方案A，前六步主要采用滚动预测，后18步主要采用MIMO
+    def fusion_test(self, setting):
+        # 1. 获取测试集数据 (flag='test')
+        test_data, test_loader = self._get_data(flag='test')
+        print('Loading best model for Fusion Inference...')
+
+        # 2. 加载模型
+        self.model.load_state_dict(torch.load(os.path.join(self.args.checkpoints, setting, 'checkpoint.pth')))
+        # 3. 开启“考试模式”
+        self.model.eval()
+
+        preds = []  # 存预测结果
+        trues = []  # 存标准答案
+        visual_samples = []  # 存几个典型样本用来画图
+
+        # =============================================================
+        # [核心修改] 准备双轨融合参数
+        # =============================================================
+        # 融合权重: 线性衰减 [1.0 -> 0.2]
+        # 前 6 分钟主要信 Rolling (物理惯性强)，后 18 分钟信 One-Shot (锚定准)
+        fusion_weights = torch.linspace(1.0, 0.2, self.args.pred_len).to(self.device).view(1, -1, 1)
+        step_size = 6  # 滚动步长 (分块滚动)
+
+        print(f">>> 启动方案A推理: Rolling(Step={step_size}) + OneShot 加权融合")
+
+        # 4. 关闭梯度
+        with torch.no_grad():
+            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(test_loader):
+                batch_x = batch_x.float().to(self.device)
+                batch_y = batch_y.float().to(self.device)
+                batch_x_mark = batch_x_mark.float().to(self.device)
+                batch_y_mark = batch_y_mark.float().to(self.device)
+
+                # ---------------------------------------------------------
+                # 轨道 1: One-Shot (一次性预测) - 负责兜底和远期锚定
+                # ---------------------------------------------------------
+                pred_oneshot = self.model(batch_x)
+
+                # ---------------------------------------------------------
+                # 轨道 2: Rolling (分块滚动) - 负责捕捉短期物理惯性
+                # ---------------------------------------------------------
+                pred_rolling_pieces = []
+                curr_x = batch_x.clone()
+                # 计算需要滚动的次数 (例如 24/6 = 4次)
+                num_rolls = (self.args.pred_len + step_size - 1) // step_size
+
+                for r in range(num_rolls):
+                    # 预测
+                    out = self.model(curr_x)
+                    # 截取高置信度片段 (前 step_size 个点)
+                    this_step_len = min(step_size, self.args.pred_len - r * step_size)
+                    trusted_part = out[:, :this_step_len, :]
+                    pred_rolling_pieces.append(trusted_part)
+
+                    # 滚动更新输入: 移除旧数据，拼接新预测
+                    if r < num_rolls - 1:
+                        curr_x = torch.cat([curr_x[:, step_size:, :], trusted_part], dim=1)
+
+                # 拼接完整的 Rolling 预测序列
+                pred_rolling = torch.cat(pred_rolling_pieces, dim=1)
+
+                # ---------------------------------------------------------
+                # 核心: 加权融合 (Fusion)
+                # ---------------------------------------------------------
+                # outputs 即为最终融合后的结果
+                outputs = fusion_weights * pred_rolling + (1 - fusion_weights) * pred_oneshot
+
+                # ---------------------------------------------------------
+                # 后续逻辑保持完全一致
+                # ---------------------------------------------------------
+                f_dim = -1
+                outputs = outputs[:, :, f_dim:]
+                batch_y = batch_y[:, -self.args.pred_len:, f_dim:]
+
+                # 个例抓取 (逻辑不变，但由原来的 One-Shot 变成了融合后的 outputs)
+                if i % 50 == 0 and len(visual_samples) < 6:
+                    hist_data = batch_x[0, :, -1].detach().cpu().numpy()
+                    true_data = batch_y[0, :, 0].detach().cpu().numpy()
+                    pred_data = outputs[0, :, 0].detach().cpu().numpy()
+                    visual_samples.append((hist_data, true_data, pred_data))
+
+                # 收集结果
+                preds.append(outputs.detach().cpu().numpy())
+                trues.append(batch_y.detach().cpu().numpy())
+
+        # 5. 拼接
+        preds = np.concatenate(preds, axis=0)
+        trues = np.concatenate(trues, axis=0)
+
+        # 6. 反归一化
+        print("正在进行数据反归一化...")
+        preds = test_data.inverse_transform_target(preds)
+        trues = test_data.inverse_transform_target(trues)
+
+        # 7. 拍扁数据
+        preds_flat = preds.reshape(-1)
+        trues_flat = trues.reshape(-1)
+
+        # 8. 算分
+        mae, mse, rmse, mape, mspe, r2 = metric(preds_flat, trues_flat)
+
+        print('=' * 40)
+        print(f'  Crossformer (Scheme A Fusion) 测试集性能评估')
+        print(f'  MAE  : {mae:.4f} | MSE  : {mse:.4f} | RMSE : {rmse:.4f}')
+        print(f'  R2   : {r2:.4f}')
+        print('=' * 40)
+
+        # 9. 创建结果文件夹
+        folder_path = os.path.join(self.args.save_folder, setting)
+        if not os.path.exists(folder_path):
+            os.makedirs(folder_path)
+
+        # 10. 保存成绩单到 txt (增加了 Strategy 说明)
+
+        print(f">>> 正在计算分步指标并保存至: {folder_path}/metrics.txt ...")
+        with open(os.path.join(folder_path, 'metrics.txt'), 'w') as f:
+            # A.写入总体核心指标
+            f.write(f"Experiment Setting: {setting}\n")
+            f.write(f"Strategy: Scheme A (Rolling Step={step_size} + Weighted OneShot)\n")
+            f.write(f"Resample Step: {self.args.resample_step}\n")
+            f.write(f"Data Percentage: {self.args.data_percentage}\n")
+            f.write("-" * 30 + "\n")
+            f.write(f"MAE  : {mae:.4f}\n")
+            f.write(f"MSE  : {mse:.4f}\n")
+            f.write(f"RMSE : {rmse:.4f}\n")
+            f.write(f"R2   : {r2:.4f}\n")
+            f.write("-" * 30 + "\n")
+
+            # B. [核心修改] 写入关键时间点(6, 12, 18, 24)的单独指标
+            f.write("\n" + "=" * 15 + " Step-wise Performance " + "=" * 15 + "\n")
+            key_steps = [6, 12, 18, 24]
+
+            for step in key_steps:
+                if step > self.args.pred_len:
+                    continue
+
+                # 取出第 step 个时刻的数据 (索引是 step-1)
+                step_idx = step - 1
+                # 切片形状: [Batch, 1] -> 拍扁 -> [Batch]
+                curr_pred = preds[:, step_idx, :].reshape(-1)
+                curr_true = trues[:, step_idx, :].reshape(-1)
+
+                # 单独算分
+                s_mae, s_mse, s_rmse, s_mape, s_mspe, s_r2 = metric(curr_pred, curr_true)
+
+                f.write(f"Step {step:<2}: MAE={s_mae:.4f} | MSE={s_mse:.4f} | RMSE={s_rmse:.4f} | R2={s_r2:.4f}\n")
+
+            # C.写入模型配置参数
+            f.write("\n" + "-" * 30 + " Configuration " + "-" * 30 + "\n")
+            for key, value in vars(self.args).items():
+                if not key.startswith('_') and not isinstance(value, torch.device):
+                    f.write(f"{key:<20} : {value}\n")
+            f.write("-" * 75 + "\n")
+
+        # 11. 画图 (完全保持原样)
+        key_steps = [6, 12, 18, 24]
+        print("-" * 20 + " 开始绘制分步预测图 " + "-" * 20)
+
+        for step in key_steps:
+            if step > self.args.pred_len:
+                continue
+            step_idx = step - 1
+            current_step_trues = trues[:, step_idx, 0]
+            current_step_preds = preds[:, step_idx, 0]
+
+            plot_predictions(
+                current_step_trues,
+                current_step_preds,
+                folder_path,
+                self.args.target_col,
+                step_label=f"Step {step}"
+            )
+
+        # B. 个例分析图
+        # 确保使用 dataset 的 scaler 参数
+        if hasattr(test_data, 'scaler'):
+            mean = test_data.scaler.mean[-1]
+            std = test_data.scaler.std[-1]
+            plot_case_visuals(visual_samples, folder_path, mean, std)
 
 
 if __name__ == '__main__':
@@ -550,6 +750,7 @@ if __name__ == '__main__':
 
         # 直接测试
         trainer.test(TEST_ONLY_SETTING)
+        #trainer.fusion_test(TEST_ONLY_SETTING)#方案A
 
     else:
         # 【模式 B：新训练 + 测试】
@@ -565,3 +766,5 @@ if __name__ == '__main__':
 
         print('>>>>>>> 开始测试 Crossformer >>>>>>>')
         trainer.test(setting)
+        # print('使用新的融合测试方案进行测试')
+        # trainer.fusion_test(setting)  # 方案A
