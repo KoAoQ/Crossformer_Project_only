@@ -229,7 +229,7 @@ class Trainer:
         # 3. 定义损失函数 (Criterion)
         # MSELoss (均方误差) 是回归任务最常用的“打分器”
         # 它计算 (预测值 - 真实值)^2 的平均值
-        self.criterion = TemporalWeightedMSE(seq_len=self.args.pred_len, start_weight=1.0, end_weight=10.0)
+        self.criterion = TemporalWeightedMSE(seq_len=self.args.pred_len, start_weight=1.0, end_weight=1.0)
 
     def _get_data(self, flag):
         # 1. 决定要不要打乱数据 (Shuffle)
