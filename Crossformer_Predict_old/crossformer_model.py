@@ -3,6 +3,54 @@ import torch.nn as nn
 import math
 from einops import rearrange, repeat
 
+
+# =========================================================================
+# [新增] Scheme B: 预测精修模块 (Prediction Refiner)
+# =========================================================================
+class PredictionRefiner(nn.Module):
+    """
+    作用：接收 Crossformer 的初步预测结果，利用卷积网络捕捉局部趋势，
+    修正“毛刺”并平滑曲线，解决长时预测中的漂移问题。
+    """
+
+    def __init__(self, channels, mid_channels=64):
+        super(PredictionRefiner, self).__init__()
+        # channels: 输入数据的维度 (即 data_dim，变量的个数)
+        # mid_channels: 中间隐层的维度，决定了修正网络的容量
+
+        self.refine_net = nn.Sequential(
+            # 第一层卷积：感受野 = 5，负责看“前后文”
+            nn.Conv1d(in_channels=channels, out_channels=mid_channels, kernel_size=5, padding=2),
+            nn.GELU(),
+            nn.Dropout(0.1),
+
+            # 第二层卷积：进一步提取特征
+            nn.Conv1d(in_channels=mid_channels, out_channels=mid_channels, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Dropout(0.1),
+
+            # 输出层：映射回原始维度，输出“残差”(Residual)
+            nn.Conv1d(in_channels=mid_channels, out_channels=channels, kernel_size=1)
+        )
+
+        # 门控参数：控制初始修正力度，让模型训练更稳定
+        # 初始设为 0 或很小的值，意味着刚开始不修正，慢慢学习修正
+        self.gate = nn.Parameter(torch.tensor(0.0))
+
+    def forward(self, coarse_pred):
+        # coarse_pred 形状: [Batch, Length, Channels]
+
+        # 1. 维度变换 -> [Batch, Channels, Length] 以适配 Conv1d
+        x = rearrange(coarse_pred, 'b l c -> b c l')
+
+        # 2. 计算修正量 (Residual)
+        residual = self.refine_net(x)
+
+        # 3. 变回原维度
+        residual = rearrange(residual, 'b c l -> b l c')
+
+        # 4. 加上修正量 (Refined = Coarse + Gate * Residual)
+        return coarse_pred + self.gate * residual
 #DSW嵌入
 class DSW_embedding(nn.Module):
     def __init__(self, seg_len, d_model):
@@ -520,7 +568,7 @@ class Crossformer(nn.Module):
         self.dec_pos_embedding = nn.Parameter(torch.randn(1, data_dim, (self.pad_out_len // seg_len), d_model))
         self.decoder = Decoder(seg_len, e_layers + 1, d_model, n_heads, d_ff, dropout,
                                out_seg_num=(self.pad_out_len // seg_len), factor=factor)
-
+        self.refiner = PredictionRefiner(channels=data_dim, mid_channels=64)# [新增] 初始化 Refiner
     def forward(self, x_seq):
         # x_seq 输入形状: [Batch, Time(in_len), Vars]
 
@@ -570,5 +618,6 @@ class Crossformer(nn.Module):
 
         dec_in = repeat(self.dec_pos_embedding, 'b ts_d l d -> (repeat b) ts_d l d', repeat=batch_size)
         predict_y = self.decoder(dec_in, enc_out)
-
-        return base + predict_y[:, :self.out_len, :]
+        coarse_output = base + predict_y[:, :self.out_len, :]# 原始的粗糙预测
+        final_output = self.refiner(coarse_output)
+        return final_output

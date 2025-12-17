@@ -518,178 +518,7 @@ class Trainer:
         mean = test_data.scaler.mean[-1]
         std = test_data.scaler.std[-1]
         plot_case_visuals(visual_samples, folder_path, mean, std)
-#混合测试方案A，前六步主要采用滚动预测，后18步主要采用MIMO
-    def test_fusion(self, setting, step_size=6):
-        """
-        [终极版] 双轨融合推理 + 全面分步对比诊断
-        功能：
-        1. 同时执行 One-Shot, Rolling, Fusion。
-        2. 保存所有结果文件 (.npy) 和 绘图。
-        3. 生成详细的 "Step-wise Battle" 报告，看清谁在前期强，谁在后期强。
-        """
-        test_data, test_loader = self._get_data(flag='test')
 
-        print(f">>> loading best model: {setting}")
-        self.model.load_state_dict(torch.load(os.path.join(self.args.checkpoints, setting, 'checkpoint.pth')))
-        self.model.eval()
-
-        # 准备三个列表，分别存三种策略的结果
-        preds_oneshot = []
-        preds_rolling = []
-        preds_fusion = []
-        trues = []
-
-        # 融合权重 (线性衰减，可根据后续诊断调整)
-        fusion_weights = torch.linspace(1.0, 0.2, self.args.pred_len).to(self.device).view(1, -1, 1)
-
-        print(f">>> 启动三路对比推理 (OneShot vs Rolling vs Fusion)...")
-
-        with torch.no_grad():
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(tqdm(test_loader)):
-                batch_x = batch_x.float().to(self.device)
-                batch_y = batch_y.float().to(self.device)
-
-                # --- 1. 纯 One-Shot 跑一次 ---
-                p_one = self.model(batch_x)
-
-                # --- 2. 纯 Rolling 跑一次 ---
-                p_roll_pieces = []
-                curr_x = batch_x.clone()
-                num_rolls = (self.args.pred_len + step_size - 1) // step_size
-
-                for r in range(num_rolls):
-                    out = self.model(curr_x)
-                    step_len = min(step_size, self.args.pred_len - r * step_size)
-                    trusted = out[:, :step_len, :]
-                    p_roll_pieces.append(trusted)
-
-                    if r < num_rolls - 1:
-                        curr_x = torch.cat([curr_x[:, step_size:, :], trusted], dim=1)
-
-                p_roll = torch.cat(p_roll_pieces, dim=1)
-
-                # --- 3. 计算融合结果 ---
-                p_fuse = fusion_weights * p_roll + (1 - fusion_weights) * p_one
-
-                # 收集所有结果
-                f_dim = -1
-
-                preds_oneshot.append(p_one[:, :, f_dim:].cpu().numpy())
-                preds_rolling.append(p_roll[:, :, f_dim:].cpu().numpy())
-                preds_fusion.append(p_fuse[:, :, f_dim:].cpu().numpy())
-                trues.append(batch_y[:, -self.args.pred_len:, f_dim:].cpu().numpy())
-
-        # --- 后处理：拼接与反归一化 ---
-        preds_oneshot = np.concatenate(preds_oneshot, axis=0)
-        preds_rolling = np.concatenate(preds_rolling, axis=0)
-        preds_fusion = np.concatenate(preds_fusion, axis=0)
-        trues = np.concatenate(trues, axis=0)
-
-        #  反归一化 (使用 Dataset 自带的方法，不再手动计算)
-        print("正在进行数据反归一化...")
-        if hasattr(test_data, 'inverse_transform_target'):
-            preds_oneshot = test_data.inverse_transform_target(preds_oneshot)
-            preds_rolling = test_data.inverse_transform_target(preds_rolling)
-            preds_fusion = test_data.inverse_transform_target(preds_fusion)
-            trues = test_data.inverse_transform_target(trues)
-        else:
-            # 兜底逻辑：万一没有这个方法，才尝试手动 (加了 hasattr 保护)
-            if hasattr(test_data, 'scaler') and self.args.target_col in test_data.scaler.mean_dict:
-                mean = test_data.scaler.mean_dict[self.args.target_col]
-                std = test_data.scaler.std_dict[self.args.target_col]
-                preds_oneshot = preds_oneshot * std + mean
-                preds_rolling = preds_rolling * std + mean
-                preds_fusion = preds_fusion * std + mean
-                trues = trues * std + mean
-
-        # --- 准备保存路径 ---
-        folder_path = os.path.join(self.args.checkpoints, setting, 'fusion_diagnosis')
-        if not os.path.exists(folder_path):
-            os.makedirs(folder_path)
-
-        print(f">>> 正在生成诊断报告，请稍候... (保存至 {folder_path})")
-
-        # =========================================================
-        # [核心功能] 生成 "PK 战报" (metrics.txt)
-        # =========================================================
-        with open(os.path.join(folder_path, 'metrics.txt'), 'w') as f:
-            f.write(f"Experiment Setting: {setting}\n")
-            f.write(f"Fusion Strategy: Linear Weight (1.0 -> 0.2)\n")
-            f.write(f"Rolling Step: {step_size}\n")
-            f.write("=" * 85 + "\n")
-            f.write(f"{'Metric':<10} | {'One-Shot':<12} | {'Rolling':<12} | {'Fusion (Yours)':<12}\n")
-            f.write("-" * 85 + "\n")
-
-            # 1. 总体指标对比
-            m_one = metric(preds_oneshot.reshape(-1), trues.reshape(-1))
-            m_roll = metric(preds_rolling.reshape(-1), trues.reshape(-1))
-            m_fuse = metric(preds_fusion.reshape(-1), trues.reshape(-1))
-
-            f.write(f"{'Overall MAE':<10} | {m_one[0]:<12.4f} | {m_roll[0]:<12.4f} | {m_fuse[0]:<12.4f}\n")
-            f.write(f"{'Overall RMSE':<10}| {m_one[2]:<12.4f} | {m_roll[2]:<12.4f} | {m_fuse[2]:<12.4f}\n")
-            f.write(f"{'Overall R2':<10} | {m_one[5]:<12.4f} | {m_roll[5]:<12.4f} | {m_fuse[5]:<12.4f}\n")
-            f.write("=" * 85 + "\n\n")
-
-            # 2. 分步指标对比 (Step-wise Battle)
-            f.write("=" * 30 + " Step-wise Breakdown " + "=" * 30 + "\n")
-            # 表头
-            f.write(f"{'Step':<6} | {'One-Shot MAE':<14} | {'Rolling MAE':<14} | {'Fusion MAE':<14} | {'Winner?'}\n")
-            f.write("-" * 85 + "\n")
-
-            key_steps = [6, 12, 18, 24]
-            for step in key_steps:
-                if step > self.args.pred_len: continue
-                idx = step - 1
-
-                # 计算当步 MAE
-                mae_o, _, _, _, _, _ = metric(preds_oneshot[:, idx, :].reshape(-1), trues[:, idx, :].reshape(-1))
-                mae_r, _, _, _, _, _ = metric(preds_rolling[:, idx, :].reshape(-1), trues[:, idx, :].reshape(-1))
-                mae_f, _, _, _, _, _ = metric(preds_fusion[:, idx, :].reshape(-1), trues[:, idx, :].reshape(-1))
-
-                # 判断谁赢了
-                scores = {'OneShot': mae_o, 'Rolling': mae_r, 'Fusion': mae_f}
-                winner = min(scores, key=scores.get)
-
-                f.write(f"{step:<6} | {mae_o:<14.4f} | {mae_r:<14.4f} | {mae_f:<14.4f} | {winner}\n")
-
-            f.write("-" * 85 + "\n")
-            f.write("Analysis Guide:\n")
-            f.write("1. If Rolling MAE < One-Shot MAE at early steps: Rolling works.\n")
-            f.write("2. If One-Shot MAE < Rolling MAE at late steps: Anchoring works.\n")
-            f.write("3. If Fusion MAE is NOT the lowest: Check your weights!\n")
-
-        # =========================================================
-        # 保存文件 (全部保存，方便复盘)
-        # =========================================================
-        np.save(os.path.join(folder_path, 'metrics_fusion.npy'), np.array(m_fuse))
-        np.save(os.path.join(folder_path, 'pred_fusion.npy'), preds_fusion)
-        np.save(os.path.join(folder_path, 'pred_rolling.npy'), preds_rolling)  # 额外保存
-        np.save(os.path.join(folder_path, 'pred_oneshot.npy'), preds_oneshot)  # 额外保存
-        np.save(os.path.join(folder_path, 'true.npy'), trues)
-
-        # =========================================================
-        # 画图 (以 Fusion 结果为主，但在 title 里标注)
-        # =========================================================
-        # 尝试调用外部画图函数 (如果没有就用简易版)
-        target_name = self.args.target_col
-        try:
-            from utils.tools import plot_predictions
-            # 只画 Fusion 的结果作为最终展示
-            last_point_trues = trues[:, -1, 0]
-            last_point_preds = preds_fusion[:, -1, 0]
-
-            plot_predictions(
-                last_point_trues,
-                last_point_preds,
-                folder_path,
-                target_name,
-                step_label="Final_Step_Fusion"
-            )
-        except ImportError:
-            pass  # 省略简易版逻辑，之前给过
-
-        print(f">>> 诊断完成！请打开 {folder_path}/metrics.txt 查看详细战报。")
-        return
 
 
 if __name__ == '__main__':
@@ -706,13 +535,6 @@ if __name__ == '__main__':
     args.random_seed = SEED  # 记录固定的种子
     args.experiment_id = rand_id  # 记录本次的随机ID
 
-    # ======================================================
-    #  🔥 【修改点】手动指定要测试的模型文件夹名称
-    #  如果这里填了字符串（比如 'Crossformer_TEM_sl192_...'），
-    #  代码就会跳过训练，直接去这个文件夹里加载模型进行测试。
-    #  如果填 None，则代表“训练+测试”的新实验模式。
-    # ======================================================
-    TEST_ONLY_SETTING = 'Crossformer_TEM_sl192_pl24_rs2_dp10_20251217_094250_2354'  # <--- 平时设为 None，想复现时填入你的文件夹名
 
     # 安全检查与特征数自动计算 (保持不变)
     if not os.path.exists(os.path.join(args.root_path, args.data_path)):
@@ -729,36 +551,15 @@ if __name__ == '__main__':
     # 实例化 Trainer
     trainer = Trainer(args)
 
-    # === 分支逻辑 ===
-    if TEST_ONLY_SETTING is not None:
-        # 【模式 A：只测试旧模型】
-        print(f">>> 进入【只测试模式】 (Test Only)")
-        print(f">>> 即将加载模型: {TEST_ONLY_SETTING}")
+    import re
 
-        # 检查文件夹是否存在，防止填错
-        if not os.path.exists(os.path.join(args.checkpoints, TEST_ONLY_SETTING)):
-            print(f"❌ 错误：在 checkpoints 目录下找不到文件夹 [{TEST_ONLY_SETTING}]")
-            print("请检查文件夹名字是否复制正确！")
-            exit()
+    safe_target = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9_]', '', args.target_col)
+    timestamp = time.strftime('%Y%m%d_%H%M%S')
+    setting = f'Crossformer_{safe_target[:4]}_sl{args.seq_len}_pl{args.pred_len}_rs{args.resample_step}_dp{int(args.data_percentage * 100)}_{timestamp}_{rand_id}'
 
-        # 直接测试
-        #trainer.test(TEST_ONLY_SETTING)
-        print('使用新的融合测试方案进行测试')
-        trainer.test_fusion(TEST_ONLY_SETTING)#方案A
+    print(f">>> 本次实验唯一标识符: {setting}")
+    print('>>>>>>> 开始训练 Crossformer >>>>>>>')
+    trainer.train(setting)
 
-    else:
-        # 【模式 B：新训练 + 测试】
-        import re
-
-        safe_target = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9_]', '', args.target_col)
-        timestamp = time.strftime('%Y%m%d_%H%M%S')
-        setting = f'Crossformer_{safe_target[:4]}_sl{args.seq_len}_pl{args.pred_len}_rs{args.resample_step}_dp{int(args.data_percentage * 100)}_{timestamp}_{rand_id}'
-
-        print(f">>> 本次实验唯一标识符: {setting}")
-        print('>>>>>>> 开始训练 Crossformer >>>>>>>')
-        trainer.train(setting)
-
-        print('>>>>>>> 开始测试 Crossformer >>>>>>>')
-        #trainer.test(setting)
-        print('使用新的融合测试方案进行测试')
-        trainer.test_fusion(setting)  # 方案A
+    print('>>>>>>> 开始测试 Crossformer >>>>>>>')
+    trainer.test(setting)
