@@ -63,68 +63,65 @@ class AttentionLayer(nn.Module):
     def __init__(self, d_model, n_heads, d_keys=None, d_values=None, dropout=0.1):
         super(AttentionLayer, self).__init__()
 
-        # 1. 计算每个头的维度 (Dimension per Head)
-        # 如果没指定每个头多大，就自动平分。
-        # 例如：d_model=256, n_heads=4 -> 每个头 d_keys = 64
+        # 1. 计算每个头的维度
         d_keys = d_keys or (d_model // n_heads)
         d_values = d_values or (d_model // n_heads)
 
-        # 2. 实例化核心计算引擎
-        # 这里就是刚才的 FullAttention，它负责算 softmax(QK^T)V
+        # 2. 实例化核心计算引擎 (QK^T)
         self.inner_attention = FullAttention(scale=None, attention_dropout=dropout)
 
-        # 3. 定义投影层 (Projections) —— 关键！
-        # 这三个线性层负责把原始输入映射到“多头空间”。
-        # 输入维度: d_model (256)
-        # 输出维度: d_keys * n_heads (64 * 4 = 256)
-        # 虽然维度没变，但数据经过了一次线性变换，变成了适合做 Attention 的形态。
-        self.query_projection = nn.Linear(d_model, d_keys * n_heads)    #把x变成专门用来“提问”的Q。
-        self.key_projection = nn.Linear(d_model, d_keys * n_heads)      #把x变成专门用来“被索引”的K。
-        self.value_projection = nn.Linear(d_model, d_values * n_heads)  #把x变成专门用来“提取内容”的V。
+        # 3. 投影层
+        self.query_projection = nn.Linear(d_model, d_keys * n_heads)
+        self.key_projection = nn.Linear(d_model, d_keys * n_heads)
+        self.value_projection = nn.Linear(d_model, d_values * n_heads)
 
-        # 4. 定义输出投影层
-        # 负责把多头算出来的结果拼接后，再融合一次
+        # ============================================================
+        # [新增] Gated Attention 核心模块 (论文方案 G1)
+        # 论文引用: "applying an head-specific sigmoid gate after the SDPA" [cite: 9]
+        # ============================================================
+        self.n_heads = n_heads
+        self.total_value_dim = d_values * n_heads
+
+        # 定义门控网络: Linear -> Sigmoid
+        # 输入维度: 所有头的输出拼接 (Head * d_values)
+        # 输出维度: 同上 (Element-wise Gating)
+        # 这里的 Linear 层权重对于每个维度都是独立的，满足 "Head-Specific" 要求
+        self.gate_projection = nn.Linear(self.total_value_dim, self.total_value_dim)
+
+        # 4. 最终输出投影层
         self.out_projection = nn.Linear(d_values * n_heads, d_model)
 
-        # 记录头数
-        self.n_heads = n_heads
-
     def forward(self, queries, keys, values):
-        # 1. 获取形状
-        # B: Batch Size
-        # L: Query 序列长度
-        # S: Key 序列长度
-        # 最后一维是 d_model，我们暂不关心，用 _ 忽略
         B, L, _ = queries.shape
         _, S, _ = keys.shape
         H = self.n_heads
 
-        # 2. 投影 + 分头 (Project & Split Heads) —— 最核心的张量变形
-        # 动作分解：
-        #   (1) self.query_projection(queries): 线性变换
-        #       形状变化: [B, L, d_model] -> [B, L, H * d_keys]
-        #   (2) .view(B, L, H, -1): 强制拆分最后一维
-        #       形状变化: [B, L, H*d_keys] -> [B, L, H, d_keys]
-        # 现在，我们有了 H 个独立的头，每个头的特征维度是 d_keys。
+        # 1. 投影 + 分头
         queries = self.query_projection(queries).view(B, L, H, -1)
         keys = self.key_projection(keys).view(B, S, H, -1)
         values = self.value_projection(values).view(B, S, H, -1)
 
-        # 3. 核心计算 (Attention)
-        # 调用 FullAttention，计算注意力。
-        # 此时输入的形状是 4 维的，einsum 会自动处理 H 维度（并行计算所有头）。
+        # 2. 核心注意力计算 (SDPA)
         # out 形状: [B, L, H, d_values]
         out = self.inner_attention(queries, keys, values)
 
-        # 4. 合并多头 (Concatenate Heads)
-        # .view(B, L, -1): 把 H 和 d_values 重新捏在一起
+        # 3. 合并多头 (Concatenate Heads)
         # 形状变化: [B, L, H, d_values] -> [B, L, H * d_values]
-        # 这相当于把 4 个专家的意见拼成了一份完整的报告。
         out = out.view(B, L, -1)
 
-        # 5. 输出投影 (Final Projection)
-        # 再次经过一个线性层，让不同头的信息进行交互融合。
-        # 形状变化: [B, L, H*d_values] -> [B, L, d_model]
+        # ============================================================
+        # [新增] 执行门控机制 (Gating Mechanism)
+        # 公式: Y' = Y * Sigmoid(Y * W_gate)
+        # ============================================================
+        # 1. 计算门控分数 (Gating Score)
+        # 论文指出 SDPA output gating score 具有极强的稀疏性 [cite: 311]
+        gate_score = torch.sigmoid(self.gate_projection(out))
+
+        # 2. 施加门控 (Element-wise Multiplication)
+        out = out * gate_score
+
+        # 4. 输出投影 (Final Projection)
+        # 此时的 out 已经是经过门控过滤的“干净”特征
         return self.out_projection(out)
 
 
