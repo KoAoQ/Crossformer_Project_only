@@ -294,27 +294,36 @@ class Trainer:
                 outputs = self.model(batch_x)
 
                 # ========================================================
-                # [修改区域 Start]：实施 Hybrid Loss (混合损失)
+                # [修改区域 Start]：Target + Global + PINT (三合一损失)
                 # ========================================================
 
-                # 1. 准备真实标签 (全变量)
-                # batch_y 包含了 历史(seq_len) + 未来(pred_len)，我们只取未来这一段
-                # 形状: [Batch, Pred_Len, 24] (假设24维)
+                # 1. 准备真实标签
+                # true_all: [Batch, Pred_Len, 24] (所有变量)
                 true_all = batch_y[:, -self.args.pred_len:, :]
 
-                # 2. 计算【主任务 Loss】：只看最后一列（水冷壁温度）
-                # 我们希望模型在这一列上准之又准
+                # 2. 【核心任务】：计算水冷壁温度的 Loss (最重要！)
+                # 只取最后一列 (-1)
                 pred_target = outputs[:, :, -1:]
                 true_target = true_all[:, :, -1:]
                 loss_target = self.criterion(pred_target, true_target)
 
-                # 3. 计算【辅助任务 Loss】：看所有变量
-                # 强迫 Router 去理解 风量、给煤量、负荷 之间的物理联动
+                # 3. 【辅助任务】：计算全变量 Loss
+                # 作用: 强迫模型理解风/煤/负荷之间的联动关系，辅助温度预测
                 loss_all = self.criterion(outputs, true_all)
 
-                # 4. 混合 Loss
-                # 0.5 是权重系数 (alpha)，表示分出一半精力兼顾全局物理规律
-                loss = loss_target + 0.5 * loss_all
+                # 4. 【物理约束】：计算热惯性 Loss (PINT)
+                # 仅针对 pred_target (温度) 进行平滑约束
+                # 一阶差分 (速度)
+                diff1 = pred_target[:, 1:, :] - pred_target[:, :-1, :]
+                # 二阶差分 (加速度)
+                diff2 = diff1[:, 1:, :] - diff1[:, :-1, :]
+
+                loss_phy_inertia = torch.mean(diff2 ** 2)
+
+                # 5. 总损失融合 (Total Loss)
+                # 1.0 * 温度精度 + 0.5 * 全局逻辑 + 0.1 * 物理平滑
+                # 这个组合既保证了"准"(target)，又保证了"懂"(all)，还保证了"稳"(phy)
+                loss = loss_target + 0.5 * loss_all + 0.1 * loss_phy_inertia
 
                 # ========================================================
                 # [修改区域 End]
