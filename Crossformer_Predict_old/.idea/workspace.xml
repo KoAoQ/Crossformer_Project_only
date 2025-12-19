@@ -4,7 +4,9 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="5771f485-f008-4944-97e1-f6c9b8b3865b" name="更改" comment="" />
+    <list default="true" id="5771f485-f008-4944-97e1-f6c9b8b3865b" name="更改" comment="">
+      <change beforePath="$PROJECT_DIR$/run_crossformer.py" beforeDir="false" afterPath="$PROJECT_DIR$/run_crossformer.py" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -17,9 +19,23 @@
       </list>
     </option>
   </component>
-  <component name="ProjectColorInfo"><![CDATA[{
-  "associatedIndex": 8
+  <component name="Git.Settings">
+    <option name="RECENT_BRANCH_BY_REPOSITORY">
+      <map>
+        <entry key="$PROJECT_DIR$/.." value="门控机制的研究" />
+      </map>
+    </option>
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$/.." />
+  </component>
+  <component name="GithubPullRequestsUISettings"><![CDATA[{
+  "selectedUrlAndAccountId": {
+    "url": "git@github.com:KoAoQ/Crossformer_Project_only.git",
+    "accountId": "ab4e3aae-6017-4160-9171-bc0513553c81"
+  }
 }]]></component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 8
+}</component>
   <component name="ProjectId" id="36MmV3O7egnoQHEbpSNxFELsqoh" />
   <component name="ProjectViewState">
     <option name="hideEmptyMiddlePackages" value="true" />
@@ -30,6 +46,7 @@
     "ModuleVcsDetector.initialDetectionPerformed": "true",
     "Python.run_crossformer.executor": "Run",
     "RunOnceActivity.ShowReadmeOnStart": "true",
+    "git-widget-placeholder": "baseline1",
     "ignore.virus.scanning.warn.message": "true",
     "last_opened_file_path": "D:/user_qiu/document/PycharmProjects/Crossformer_Project2.0/Crossformer_Predict_old",
     "node.js.detected.package.eslint": "true",

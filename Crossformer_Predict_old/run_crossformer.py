@@ -190,8 +190,8 @@ class Config:
         self.save_folder = './results_crossformer/'
 
         #6. 保存实验标志
-        self.model_tag = 'baseline'
-        self.seed = 2023
+        self.model_tag = 'gate'
+        self.seed = 2024
 
         # 自动填充
         # 这两个值初始化为 0 或 1，通常在主程序（run_crossformer.py）读取数据后，会根据 CSV 文件的实际列数来自动覆盖这些值。

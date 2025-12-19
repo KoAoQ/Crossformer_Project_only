@@ -1,0 +1,61 @@
+# ===========================
+# 1. Python 核心忽略项 (通用)
+# ===========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ===========================
+# 2. PyCharm / IDE 配置 (防止 workspace.xml 提交)
+# ===========================
+.idea/
+.vscode/
+*.swp
+
+# ===========================
+# 3. 数据集 (防止上传大文件)
+# ===========================
+# 忽略存放 csv 的文件夹
+datasets/
+# 忽略根目录下可能存在的 csv 文件
+*.csv
+*.xls
+*.xlsx
+
+# ===========================
+# 4. Crossformer 项目特定产出
+# ===========================
+# 根据你的运行日志，Crossformer 会生成这些特定的文件夹
+checkpoints_crossformer/
+results_crossformer/
+
+# 忽略通用的输出文件夹 (防止以后改名忘了忽略)
+checkpoints/
+results/
+logs/
+test_results/
+images/
+
+# ===========================
+# 5. 系统生成文件
+# ===========================
+.DS_Store
+Thumbs.db
