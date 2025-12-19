@@ -23,15 +23,15 @@ import os
 warnings.filterwarnings('ignore')
 #随机数种子
 def fix_seed(seed=2025):
-    random.seed(seed)
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed) # if you are using multi-GPU.
+    random.seed(seed)           #  固定 Python 原生的随机操作
+    os.environ['PYTHONHASHSEED'] = str(seed)    #  固定哈希算法（影响字典顺序等）
+    np.random.seed(seed)        #  固定 Numpy 的随机操作（数据处理常用）
+    torch.manual_seed(seed)     #  固定 PyTorch CPU 的随机初始权重
+    torch.cuda.manual_seed(seed)    #  固定 PyTorch GPU 的随机初始权重
+    torch.cuda.manual_seed_all(seed)    #  如果有多张显卡，全部固定
     # 下面这两行会让卷积算法确定化，但可能会稍微降低训练速度
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False      # 关闭 CuDNN 的自动寻优（这会牺牲一点点速度，但能保证稳定）
+    torch.backends.cudnn.deterministic = True   # 强制使用确定性卷积算法（保证结果每次都一样）
     print(f">>> [Reproducibility] Random Seed Fixed: {seed} <<<")
 
 # ================================================================
