@@ -157,7 +157,7 @@ class Config:
         # 【降采样】5表示20秒间隔
         self.resample_step = 2
         # 【数据比例】0.1=调试模式, 1.0=全量模式
-        self.data_percentage = 0.3
+        self.data_percentage = 0.2
 
         # 2. 预测任务设置
         self.seq_len = 192
@@ -191,7 +191,7 @@ class Config:
 
         #6. 保存实验标志
         self.model_tag = 'baseline'
-        self.seed = 2025
+        self.seed = 2023
 
         # 自动填充
         # 这两个值初始化为 0 或 1，通常在主程序（run_crossformer.py）读取数据后，会根据 CSV 文件的实际列数来自动覆盖这些值。
@@ -524,7 +524,7 @@ class Trainer:
         plot_case_visuals(visual_samples, folder_path, mean, std)
 
 
-if __name__ == '__main__':
+if __name__ == '__main__':#basline
     # 1. 🔥 先实例化 Config (为了拿到 seed 和 model_tag)
     args = Config()
 
