@@ -190,7 +190,7 @@ class Config:
         self.save_folder = './results_crossformer/'
 
         #6. 保存实验标志
-        self.model_tag = 'baseline'
+        self.model_tag = 'gate+physics'
         self.seed = 2023
 
         # 自动填充
