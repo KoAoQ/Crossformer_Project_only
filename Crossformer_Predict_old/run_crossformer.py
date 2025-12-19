@@ -519,7 +519,7 @@ class Trainer:
         std = test_data.scaler.std[-1]
         plot_case_visuals(visual_samples, folder_path, mean, std)
 
-if __name__ == '__main__':
+if __name__ == '__main__':#Baseline
     # 1. 固定随机种子
     SEED = 2025
     fix_seed(SEED)
