@@ -189,6 +189,10 @@ class Config:
         self.checkpoints = './checkpoints_crossformer/'
         self.save_folder = './results_crossformer/'
 
+        #6. 保存实验标志
+        self.model_tag = 'baseline'
+        self.seed = 2025
+
         # 自动填充
         # 这两个值初始化为 0 或 1，通常在主程序（run_crossformer.py）读取数据后，会根据 CSV 文件的实际列数来自动覆盖这些值。
         self.enc_in = 0        #输入特征数。
@@ -519,33 +523,18 @@ class Trainer:
         std = test_data.scaler.std[-1]
         plot_case_visuals(visual_samples, folder_path, mean, std)
 
-if __name__ == '__main__':#Baseline
-    # 1. 固定随机种子
-    SEED = 2025
-    fix_seed(SEED)
 
+if __name__ == '__main__':
+    # 1. 🔥 先实例化 Config (为了拿到 seed 和 model_tag)
     args = Config()
 
-    # 2. 生成随机实验ID
-    import random
-    rand_id = random.randint(1000, 9999)
-
-    args.random_seed = SEED  # 记录固定的种子
-    args.experiment_id = rand_id  # 记录本次的随机ID
-
-    # ======================================================
-    #  🔥 【修改点】手动指定要测试的模型文件夹名称
-    #  如果这里填了字符串（比如 'Crossformer_TEM_sl192_...'），
-    #  代码就会跳过训练，直接去这个文件夹里加载模型进行测试。
-    #  如果填 None，则代表“训练+测试”的新实验模式。
-    # ======================================================
-    TEST_ONLY_SETTING = 'Crossformer_TEM_sl192_pl24_rs2_dp10_20251217_094250_2354'  # <--- 平时设为 None，想复现时填入你的文件夹名
+    # 2. 🔥 固定随机种子
+    fix_seed(args.seed)
 
     # 安全检查与特征数自动计算 (保持不变)
     if not os.path.exists(os.path.join(args.root_path, args.data_path)):
         print(f"错误：找不到文件 {args.data_path}")
         exit()
-
     try:
         df_tmp = pd.read_csv(os.path.join(args.root_path, args.data_path), nrows=5, encoding='gbk')
     except:
@@ -559,9 +548,12 @@ if __name__ == '__main__':#Baseline
 
     safe_target = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9_]', '', args.target_col)
     timestamp = time.strftime('%Y%m%d_%H%M%S')
-    setting = f'Crossformer_{safe_target[:4]}_sl{args.seq_len}_pl{args.pred_len}_rs{args.resample_step}_dp{int(args.data_percentage * 100)}_{timestamp}_{rand_id}'
+
+    setting = f'Crossformer_{safe_target[:4]}_sl{args.seq_len}_pl{args.pred_len}_rs{args.resample_step}_dp{int(args.data_percentage * 100)}_{timestamp}_{args.model_tag}'
 
     print(f">>> 本次实验唯一标识符: {setting}")
+    print(f">>> 使用随机种子: {args.seed}")
+
     print('>>>>>>> 开始训练 Crossformer >>>>>>>')
     trainer.train(setting)
 
