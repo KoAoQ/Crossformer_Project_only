@@ -22,7 +22,7 @@ import os
 
 warnings.filterwarnings('ignore')
 #随机数种子
-def fix_seed(seed=2025):
+def fix_seed(seed=2024):
     random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)
@@ -157,7 +157,7 @@ class Config:
         # 【降采样】5表示20秒间隔
         self.resample_step = 2
         # 【数据比例】0.1=调试模式, 1.0=全量模式
-        self.data_percentage = 0.3
+        self.data_percentage = 0.2
 
         # 2. 预测任务设置
         self.seq_len = 192
@@ -519,9 +519,9 @@ class Trainer:
         std = test_data.scaler.std[-1]
         plot_case_visuals(visual_samples, folder_path, mean, std)
 
-if __name__ == '__main__':
+if __name__ == '__main__':#门控机制
     # 1. 固定随机种子
-    SEED = 2025
+    SEED = 2024
     fix_seed(SEED)
 
     args = Config()
