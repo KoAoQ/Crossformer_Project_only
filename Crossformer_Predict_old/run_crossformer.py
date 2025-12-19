@@ -521,7 +521,7 @@ class Trainer:
 
 
 
-if __name__ == '__main__':
+if __name__ == '__main__':#refine方案的实现
     # 1. 固定随机种子
     SEED = 2025
     fix_seed(SEED)
