@@ -157,7 +157,7 @@ class Config:
         # 【降采样】5表示20秒间隔
         self.resample_step = 2
         # 【数据比例】0.1=调试模式, 1.0=全量模式
-        self.data_percentage = 0.2
+        self.data_percentage = 1
 
         # 2. 预测任务设置
         self.seq_len = 192
@@ -190,8 +190,8 @@ class Config:
         self.save_folder = './results_crossformer/'
 
         #6. 保存实验标志
-        self.model_tag = 'gate+physics'
-        self.seed = 2023
+        self.model_tag = 'gate+0.01inertia+0.05trend+all'
+        self.seed = 2025
 
         # 自动填充
         # 这两个值初始化为 0 或 1，通常在主程序（run_crossformer.py）读取数据后，会根据 CSV 文件的实际列数来自动覆盖这些值。
@@ -320,10 +320,17 @@ class Trainer:
 
                 loss_phy_inertia = torch.mean(diff2 ** 2)
 
+                # 2. 【新增】趋势一致性 Loss (让你敏捷) - 对抗滞后
+                # 计算真实值的一阶差分（速度/方向）
+                diff1_true = true_target[:, 1:, :] - true_target[:, :-1, :]
+                # 强迫预测的速度/方向去逼近真实的速度/方向
+                # 使用 MSE 来约束变化率的一致性
+                loss_phy_trend = torch.mean((diff1 - diff1_true) ** 2)
+
                 # 5. 总损失融合 (Total Loss)
                 # 1.0 * 温度精度 + 0.5 * 全局逻辑 + 0.1 * 物理平滑
                 # 这个组合既保证了"准"(target)，又保证了"懂"(all)，还保证了"稳"(phy)
-                loss = loss_target + 0.5 * loss_all + 0.1 * loss_phy_inertia
+                loss = loss_target + 0.5 * loss_all + 0.01 * loss_phy_inertia + 0.05 * loss_phy_trend
 
                 # ========================================================
                 # [修改区域 End]
