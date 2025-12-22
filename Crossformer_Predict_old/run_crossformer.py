@@ -157,10 +157,10 @@ class Config:
         # 【降采样】5表示20秒间隔
         self.resample_step = 2
         # 【数据比例】0.1=调试模式, 1.0=全量模式
-        self.data_percentage = 1
+        self.data_percentage = 0.2
 
         # 2. 预测任务设置
-        self.seq_len = 192
+        self.seq_len = 96
         self.label_len = 48
         self.pred_len = 24  # 8分钟
 
@@ -190,7 +190,7 @@ class Config:
         self.save_folder = './results_crossformer/'
 
         #6. 保存实验标志
-        self.model_tag = 'gate+0.01inertia+0.05trend+all'
+        self.model_tag = 'gate+0inertia+0trend+sl96'
         self.seed = 2025
 
         # 自动填充
@@ -330,7 +330,7 @@ class Trainer:
                 # 5. 总损失融合 (Total Loss)
                 # 1.0 * 温度精度 + 0.5 * 全局逻辑 + 0.1 * 物理平滑
                 # 这个组合既保证了"准"(target)，又保证了"懂"(all)，还保证了"稳"(phy)
-                loss = loss_target + 0.5 * loss_all + 0.01 * loss_phy_inertia + 0.05 * loss_phy_trend
+                loss = loss_target + 0.5 * loss_all + 0 * loss_phy_inertia + 0 * loss_phy_trend
 
                 # ========================================================
                 # [修改区域 End]
@@ -540,7 +540,7 @@ class Trainer:
         plot_case_visuals(visual_samples, folder_path, mean, std)
 
 
-if __name__ == '__main__':#门控机制的研究
+if __name__ == '__main__':#basline
     # 1. 🔥 先实例化 Config (为了拿到 seed 和 model_tag)
     args = Config()
 
