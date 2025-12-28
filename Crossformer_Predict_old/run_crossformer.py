@@ -160,7 +160,7 @@ class Config:
         self.data_percentage = 0.2
 
         # 2. 预测任务设置
-        self.seq_len = 96
+        self.seq_len = 192
         self.label_len = 48
         self.pred_len = 24  # 8分钟
 
@@ -190,7 +190,7 @@ class Config:
         self.save_folder = './results_crossformer/'
 
         #6. 保存实验标志
-        self.model_tag = 'gate+0inertia+0trend+sl96'
+        self.model_tag = 'baseline+0loss_all+sl192'
         self.seed = 2025
 
         # 自动填充
@@ -314,23 +314,53 @@ class Trainer:
                 # 4. 【物理约束】：计算热惯性 Loss (PINT)
                 # 仅针对 pred_target (温度) 进行平滑约束
                 # 一阶差分 (速度)
-                diff1 = pred_target[:, 1:, :] - pred_target[:, :-1, :]
+                diff1_pred = pred_target[:, 1:, :] - pred_target[:, :-1, :]
                 # 二阶差分 (加速度)
-                diff2 = diff1[:, 1:, :] - diff1[:, :-1, :]
+                diff2_pred = diff1_pred[:, 1:, :] - diff1_pred[:, :-1, :]
 
-                loss_phy_inertia = torch.mean(diff2 ** 2)
+                loss_phy_inertia = torch.mean(diff2_pred ** 2)
 
-                # 2. 【新增】趋势一致性 Loss (让你敏捷) - 对抗滞后
+                #  【新增】趋势一致性 Loss (让你敏捷) - 对抗滞后
                 # 计算真实值的一阶差分（速度/方向）
                 diff1_true = true_target[:, 1:, :] - true_target[:, :-1, :]
                 # 强迫预测的速度/方向去逼近真实的速度/方向
                 # 使用 MSE 来约束变化率的一致性
-                loss_phy_trend = torch.mean((diff1 - diff1_true) ** 2)
+                loss_phy_trend = torch.mean((diff1_pred - diff1_true) ** 2)
+
+                # --- 5. 【核心】计算自适应权重 ---
+                # 假设 batch_x 的第 0 列是负荷/煤量 (请根据你的数据集修改 load_index)
+                load_index = 14
+                if 'batch_x' in locals():
+                    # 1. 提取负荷数据 [Batch, Seq_Len]
+                    load_seq = batch_x[:, :, load_index]
+
+                    # 2. 计算当前样本的平均负荷水平 (归一化到 0~1 之间比较好)
+                    # 如果数据已经归一化了(StandardScaler)，那么均值大概在0附近，
+                    # 我们可以用负荷的"变化率"或者"绝对值"来衡量
+                    # 这里用一个更鲁棒的写法：计算负荷的波动程度 (标准差)
+                    # 逻辑：负荷波动大 -> 说明是变工况 -> 物理约束要小 (让它跟)
+                    #       负荷波动小 -> 说明是稳态 -> 物理约束要大 (让它稳)
+
+                    load_std = load_seq.std(dim=1)  # [Batch]
+
+                    # 3. 构造动态权重
+                    # 波动越小 (load_std 小)，权重越大
+                    # 基础权重 0.05
+                    # exp(-load_std) 会在波动大时趋近0，波动小时趋近1
+                    adaptive_weight = 0.1 * torch.exp(-load_std * 5.0)
+
+                    # 扩展维度以便广播 [Batch, 1, 1] (如果需要)
+                    # 这里直接取均值变成标量，或者保持 Batch 级权重
+                    phy_weight = adaptive_weight.mean()
+
+                else:
+                    # 保底
+                    phy_weight = 0.05
 
                 # 5. 总损失融合 (Total Loss)
                 # 1.0 * 温度精度 + 0.5 * 全局逻辑 + 0.1 * 物理平滑
                 # 这个组合既保证了"准"(target)，又保证了"懂"(all)，还保证了"稳"(phy)
-                loss = loss_target + 0.5 * loss_all + 0 * loss_phy_inertia + 0 * loss_phy_trend
+                loss = loss_target + 0 * loss_all +  0*loss_phy_trend
 
                 # ========================================================
                 # [修改区域 End]
